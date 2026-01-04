@@ -1,0 +1,5 @@
+.env
+dangdang_memory.db
+prompt.txt
+__pycache__/cognition.cpython-313.pyc
+__pycache__/memory.cpython-313.pyc
