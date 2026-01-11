@@ -1,21 +1,66 @@
 import json
 import ollama
+import base64
+import os
+import google.generativeai as genai
+from dotenv import load_dotenv
+
+# Nạp cấu hình từ tệp môi trường
+load_dotenv()
 
 class DangDangBrain:
     def __init__(self, memory_manager):
         self.memory = memory_manager
         # Tối ưu cho Quadro P650 (4GB VRAM): 
-        # Sử dụng model 3b giúp cân bằng giữa tốc độ và khả năng suy luận cảm xúc
-        self.model = "qwen2.5:3b-instruct"
+        # Sử dụng model 3b giúp cân bằng giữa tốc độ và khả năng suy luận cảm xúc.
+        # Qwen 3B giờ đây sẽ được giữ thường trực trong VRAM vì không còn swap model Vision.
+        self.think_model = "qwen2.5:3b-instruct"
+        
+        # Cấu hình Gemini Vision API (Dùng IMAGE_API_KEY để nhìn nhanh và tiết kiệm VRAM)
+        self.vision_api_key = os.getenv("IMAGE_API_KEY")
+        if self.vision_api_key:
+            genai.configure(api_key=self.vision_api_key)
+            self.vision_client = genai.GenerativeModel('gemini-3-flash-preview')
+        else:
+            self.vision_client = None
 
-    def process_background_tasks(self, user_msg, ai_msg, time_context=""):
+    def analyze_media(self, media_path):
+        """Sử dụng Gemini API để 'nhìn' - Giải phóng hoàn toàn VRAM 4GB cho việc tư duy"""
+        if not self.vision_client:
+            return "(Đôi mắt tớ đang bị nhắm lại vì thiếu IMAGE_API_KEY trong .env...)"
+
+        try:
+            # Load ảnh bằng thư viện PIL (Đảm bảo đã cài Pillow)
+            import PIL.Image
+            img = PIL.Image.open(media_path)
+
+            # Prompt mang linh hồn của Dang Dang (17 tuổi)
+            vision_prompt = """
+            Bạn là đôi mắt của Dang Dang (17 tuổi, học sinh lớp 11). 
+            Hãy nhìn bức ảnh/video này và kể lại thật tự nhiên cho Dang Dang nghe bạn thấy gì.
+            Chú ý mô tả: vật thể, hành động, biểu cảm người (nếu có), không khí/vibe của ảnh.
+            Nếu có văn bản (tiếng Việt/Anh), hãy trích xuất chính xác.
+            Dùng văn phong bạn bè, tiếng Việt tự nhiên, không dùng ngôn ngữ máy móc.
+            """
+            
+            response = self.vision_client.generate_content([vision_prompt, img])
+            description = response.text.strip()
+            
+            return description
+        except Exception as e:
+            return f"(Tớ hơi bị chói mắt, không nhìn rõ tấm ảnh này... Lỗi: {e})"
+
+    def process_background_tasks(self, user_msg, ai_msg, time_context="", media_description=""):
         """Hệ thống tư duy sâu (System 2) - Phân tích tâm lý thấu đáo và nhận thức thời gian"""
         v, e, b, _ = self.memory.get_bot_state()
         
-        # Prompt kết hợp sự nghiêm ngặt danh tính, hồn văn bản cũ và bối cảnh thời gian mới
+        # Hợp nhất bối cảnh thị giác vào luồng tư duy
+        vision_context = f"\n[HỆ THỐNG THỊ GIÁC]: Dang Dang vừa thấy: {media_description}" if media_description else ""
+        
+        # Prompt khôi phục hoàn toàn sự nghiêm ngặt danh tính và hồn văn bản cũ của bạn
         prompt = f"""
 Bạn là 'Hệ thống tư duy sâu' của Dang Dang (17 tuổi). Hãy phân tích thấu đáo cuộc hội thoại:
-Thời gian hiện tại: {time_context}
+Thời gian hiện tại: {time_context} {vision_context}
 User: "{user_msg}"
 Dang Dang: "{ai_msg}"
 
@@ -46,17 +91,17 @@ Hãy trả về một đối tượng JSON chính xác với các trường sau:
 }}
 """
         try:
-            # Sử dụng options để tối ưu hóa cho phần cứng Dell Precision 3551
+            # Qwen 3B giờ đây có thể giữ vĩnh viễn trong VRAM vì không còn swap model Vision.
             response = ollama.generate(
-                model=self.model,
+                model=self.think_model,
                 prompt=prompt,
                 format='json',
                 stream=False,
                 options={
                     "num_predict": 350,   # Độ dài đủ để mô tả kỷ niệm hay
                     "temperature": 0.4,   # Cân bằng tính chính xác
-                    "num_thread": 8,      # Tận dụng i7-10850H
-                    "keep_alive": "5m"    # Giữ model trong VRAM để phản hồi nhanh
+                    "num_thread": 8,      # Tận dụng tối đa i7-10850H (12 luồng)
+                    "keep_alive": "1h"    # Giữ model trong VRAM 1 tiếng để phản hồi tức thì
                 }
             )
             
@@ -94,17 +139,17 @@ Hãy trả về một đối tượng JSON chính xác với các trường sau:
             self.memory.decay_memories()
             
         except Exception as e:
-            # Ghi log nhẹ nhàng để không phá hỏng giao diện chat
-            print(f"\n[Hệ thống] Brain đang xử lý dữ liệu... (Ollama: {e})")
+            # Ghi log nhẹ nhàng để không phá hỏng giao diện chat CLI
+            print(f"\n[Hệ thống] Não bộ đang xử lý dữ liệu... (Ollama: {e})")
 
     def perform_reflection(self, time_context=""):
-        """Dang Dang tự soi chiếu bản thân - Khôi phục hồn văn và bối cảnh thời gian"""
+        """Dang Dang tự soi chiếu bản thân - Khôi phục hồn văn tinh tế và bối cảnh thời gian"""
         v, e, b, _ = self.memory.get_bot_state()
         memories = self.memory.get_important_memories()
         
-        # Prompt khôi phục vai diễn và sự thầm kín của nhật ký
+        # Prompt khôi phục hoàn toàn vai diễn và sự thầm kín của nhật ký từ bản cũ bạn gửi
         prompt = f"""
-Hãy đóng vai Dang Dang (17 tuổi), đang ngồi thẫn thờ viết nhật ký thầm kín.
+Hãy đóng vai Dang Dang (17 tuổi), đang ngồi thẫn thờ viết nhật ký thầm kín vào đêm khuya.
 Bối cảnh thời gian: {time_context}
 Dựa trên:
 - Tâm trạng hiện tại (Valence): {v} (1.0 là cực vui, -1.0 là cực buồn).
@@ -116,18 +161,19 @@ Chỉ trả về dòng nhật ký bằng tiếng Việt, không giải thích th
 """
         try:
             response = ollama.generate(
-                model=self.model,
+                model=self.think_model,
                 prompt=prompt,
                 stream=False,
                 options={
                     "num_predict": 120, 
                     "temperature": 0.8, # Tăng nhiệt độ để viết văn có hồn hơn
-                    "keep_alive": "5m"
+                    "num_thread": 8,    # Tối ưu hóa luồng cho i7
+                    "keep_alive": "1h"
                 }
             )
             insight = response.get('response', '').strip()
             if insight:
-                # Lưu lại suy nghĩ này vào database
+                # Lưu lại suy nghĩ này vào database để sử dụng cho bối cảnh chat sau
                 self.memory.update_bot_state(v, e, b, insight)
                 return insight
             return "Đang cảm thấy có chút mông lung..."

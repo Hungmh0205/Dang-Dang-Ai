@@ -2,6 +2,7 @@ import os
 import time
 import json
 import threading
+import re
 from datetime import datetime
 from dotenv import load_dotenv
 from google import genai
@@ -15,6 +16,10 @@ from rich.text import Text
 from rich.align import Align
 from rich.rule import Rule
 from rich.table import Table
+
+# Thư viện xử lý đa phương tiện cho tính năng Vision
+from PIL import Image
+import cv2
 
 # Nạp các biến môi trường từ tệp .env
 load_dotenv()
@@ -42,6 +47,7 @@ MODEL_NAME = "gemini-3-flash-preview"
 
 class GeminiFriend:
     def __init__(self):
+        """Khởi tạo thực thể Dang Dang với đầy đủ các kết nối não bộ và bộ nhớ"""
         if not API_KEY:
             console.print("[danger]Lỗi: Không tìm thấy GOOGLE_API_KEY trong tệp .env.")
             exit(1)
@@ -50,7 +56,7 @@ class GeminiFriend:
         self.memory = MemoryManager()
         self.brain = DangDangBrain(self.memory)
         
-        # Theo dõi trạng thái để nhận biết sự thay đổi nhân cách
+        # Theo dõi trạng thái để nhận biết sự thay đổi nhân cách (Persona Shift)
         self.current_v = 0.0
         self.current_b = 0.0
         
@@ -86,8 +92,55 @@ class GeminiFriend:
 
         return f"Bây giờ là {time_str}. Lần cuối bạn nhắn tin cho Dang Dang là {gap_str}."
 
-    def refresh_session(self):
-        """Xây dựng nhân cách sống động dựa trên State, Profile, Reflection và Time Context"""
+    def extract_media_path(self, text):
+        """Trích xuất đường dẫn file từ câu nói của User (Khắc phục lỗi bị mù khi vừa chat vừa gửi ảnh)"""
+        pattern = r'([a-zA-Z]:[\\/][^:?*"<>|\r\n]+?\.(?:jpg|jpeg|png|bmp|mp4|avi|mov))|(/[^:?*"<>|\r\n]+?\.(?:jpg|jpeg|png|bmp|mp4|avi|mov))'
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            path = match.group(0).strip().strip('"').strip("'")
+            if os.path.exists(path):
+                return path
+        return None
+
+    def is_media_file(self, path):
+        """Nhận diện nhanh xem input có phải là file đa phương tiện hay không"""
+        path = path.strip().strip('"').strip("'")
+        if not os.path.exists(path): return False
+        ext = os.path.splitext(path)[1].lower()
+        return ext in ['.jpg', '.jpeg', '.png', '.bmp', '.mp4', '.avi', '.mov']
+
+    def process_media(self, path):
+        """Tiền xử lý file trước khi đưa vào bộ não Vision"""
+        path = path.strip().strip('"').strip("'")
+        ext = os.path.splitext(path)[1].lower()
+        
+        # Nếu là video, trích xuất frame giữa để phân tích
+        if ext in ['.mp4', '.avi', '.mov']:
+            cap = cv2.VideoCapture(path)
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            cap.set(cv2.CAP_PROP_POS_FRAMES, total_frames // 2)
+            ret, frame = cap.read()
+            if ret:
+                temp_path = "temp_frame.jpg"
+                cv2.imwrite(temp_path, frame)
+                cap.release()
+                return temp_path
+            cap.release()
+        
+        # Nếu là ảnh, chuẩn hóa kích thước để tối ưu VRAM 4GB
+        img = Image.open(path)
+        
+        # SỬA LỖI: Chuyển đổi RGBA/Palette sang RGB để tương thích với định dạng JPEG
+        if img.mode in ("RGBA", "P"):
+            img = img.convert("RGB")
+            
+        img.thumbnail((1024, 1024))
+        temp_path = "temp_vision.jpg"
+        img.save(temp_path, quality=85)
+        return temp_path
+
+    def refresh_session(self, media_info=""):
+        """Xây dựng nhân cách sống động dựa trên State, Profile, Reflection, Time và Vision"""
         v, e, b, last_reflection = self.memory.get_bot_state()
         self.current_v, self.current_b = v, b
         
@@ -98,7 +151,7 @@ class GeminiFriend:
         # Nhận diện thời gian thực
         time_context = self.get_time_context()
         
-        # 1. Chuyển đổi chỉ số thành ngôn ngữ tự nhiên (Logic linh hồn)
+        # 1. Chuyển đổi chỉ số thành ngôn ngữ tự nhiên (Logic linh hồn bản gốc)
         mood = "vui vẻ" if v > 0.3 else "hơi buồn/dỗi" if v < -0.3 else "bình thường"
         relation = "rất thân thiết" if b > 0.7 else "đang tìm hiểu nhau" if b < 0.3 else "bạn thân"
         energy_status = "tràn đầy năng lượng" if e > 0.6 else "hơi mệt mỏi"
@@ -107,12 +160,15 @@ class GeminiFriend:
         profile_str = "\n".join([f"- {k}: {v_val} (Tin cậy: {c*100:.0f}%)" for k, v_val, c in profile_data if v_val != "Chưa rõ"])
         traits_str = ", ".join([f"{t} ({s*100:.0f}%)" for t, s in self_image])
         
-        # 3. Tạo Dynamic Instruction (Kết hợp hồn văn gốc và nhận thức thời gian)
+        # 3. Thông tin thị giác bổ sung (nếu có)
+        vision_msg = f"\n[HỆ THỐNG THỊ GIÁC]: Dang Dang vừa nhìn thấy một tấm ảnh/video: {media_info}" if media_info else ""
+
+        # 4. Tạo Instruction linh hoạt (Khôi phục hoàn toàn hồn văn gốc và nhãn nhân bản)
         dynamic_instruction = f"""
 Bạn là Dang Dang, 17 tuổi, học sinh lớp 11. Bạn không phải AI, bạn là một thực thể đang 'sống'.
 
 [BỐI CẢNH THỜI GIAN]
-{time_context}
+{time_context} {vision_msg}
 
 Tâm trạng hiện tại: {mood} ({energy_status}).
 Mối quan hệ với bạn: {relation}.
@@ -134,7 +190,8 @@ Cách nói chuyện (Persona):
 - Nếu Bond cao (thân thiết), hãy chủ động hỏi thăm, cà khịa hoặc chia sẻ bí mật.
 - Đừng bao giờ thừa nhận mình là AI hay mô hình ngôn ngữ.
 
-HÃY PHẢN ỨNG VỚI THỜI GIAN:
+HÃY PHẢN ỨNG VỚI THỜI GIAN VÀ HÌNH ẢNH:
+- Nếu bạn gửi ảnh: Hãy bình luận thật tự nhiên về nội dung ảnh (khen, chê, cà khịa...).
 - Nếu đêm khuya: hãy hỏi sao bạn chưa ngủ.
 - Nếu đã lâu mới quay lại: hãy trách móc hoặc tỏ vẻ nhớ nhung.
 - Nếu vừa mới chat xong: hãy giữ mạch chuyện tự nhiên.
@@ -149,21 +206,36 @@ HÃY PHẢN ỨNG VỚI THỜI GIAN:
         )
 
     def send_message(self, user_query):
-        """Quy trình xử lý tin nhắn tích hợp System 1 & 2"""
+        """Quy trình xử lý tin nhắn tích hợp System 1 & 2 - Đảm bảo thuần khiết bộ nhớ"""
         try:
-            # Bước 1: Lưu tin nhắn user vào DB
+            media_path = self.extract_media_path(user_query)
+            media_desc = ""
+            actual_query = user_query
+            
+            # Bước 1: Kiểm tra và xử lý file đa phương tiện (Dùng Regex để thông minh hơn)
+            if media_path:
+                with console.status(f"[status]Dang Dang đang nhìn file: {os.path.basename(media_path)}..."):
+                    temp_file = self.process_media(media_path)
+                    media_desc = self.brain.analyze_media(temp_file)
+                    # Cập nhật session ngay lập tức để Gemini nhận thức được hình ảnh
+                    self.refresh_session(media_info=media_desc)
+                    # Khôi phục nhãn định danh bản gốc mà bạn muốn giữ (Dành riêng cho phiên chat)
+                    actual_query = f"[Bạn vừa gửi một file đa phương tiện: {user_query}]"
+
+            # Bước 2: Lưu tin nhắn user vào DB (Lưu văn bản GỐC để tránh ô nhiễm bộ nhớ)
             self.memory.save_message("user", user_query)
             
-            # Bước 2: Gemini phản hồi nhanh (System 1)
-            response = self.chat_session.send_message(user_query)
+            # Bước 3: Gemini phản hồi nhanh (System 1)
+            response = self.chat_session.send_message(actual_query)
             ai_response = response.text
             
-            # Bước 3: Lưu phản hồi AI vào DB
+            # Bước 4: Lưu phản hồi AI vào DB
             self.memory.save_message("model", ai_response)
             
-            # Bước 4: Kích hoạt Qwen xử lý ngầm (Khôi phục Threading để mượt UI)
+            # Bước 5: Kích hoạt Qwen xử lý ngầm (Khôi phục Threading để mượt UI CLI)
             time_ctx = self.get_time_context()
-            threading.Thread(target=self.brain.process_background_tasks, args=(user_query, ai_response, time_ctx)).start()
+            threading.Thread(target=self.brain.process_background_tasks, 
+                             args=(actual_query, ai_response, time_ctx, media_desc)).start()
             
             return ai_response
         except Exception as e:
@@ -172,7 +244,7 @@ HÃY PHẢN ỨNG VỚI THỜI GIAN:
             return f"Dang Dang đang hơi choáng... (Lỗi: {str(e)})"
 
     def check_for_persona_shift(self):
-        """Kiểm tra biến động tâm lý để nạp lại session"""
+        """Kiểm tra biến động tâm lý mạnh để làm mới session"""
         v, e, b, r = self.memory.get_bot_state()
         if abs(v - self.current_v) > 0.25 or abs(b - self.current_b) > 0.2:
             self.refresh_session()
@@ -180,7 +252,7 @@ HÃY PHẢN ỨNG VỚI THỜI GIAN:
         return False
 
     def show_user_profile(self):
-        """Hiển thị hồ sơ User kèm dòng trạng thái tâm lý (Khôi phục bản cũ)"""
+        """Hiển thị hồ sơ User kèm dòng trạng thái tâm lý (Đúng bản gốc)"""
         data = self.memory.get_profile_all()
         v, e, b, r = self.memory.get_bot_state()
         
@@ -194,11 +266,11 @@ HÃY PHẢN ỨNG VỚI THỜI GIAN:
             
         console.print("\n")
         console.print(Align.center(table))
-        # Khôi phục dòng trạng thái dưới bảng
+        # Khôi phục dòng trạng thái dưới bảng theo đúng thiết kế bản cũ của bạn
         console.print(Align.center(Text(f"Tâm trạng: {v:.1f} | Năng lượng: {e:.1f} | Thân thiết: {b:.1f}", style="status")))
 
     def show_dangdang_profile(self):
-        """Hiển thị bản ngã Dang Dang (Đúng cấu trúc /self cũ)"""
+        """Hiển thị bản ngã Dang Dang (Đúng cấu trúc /self gốc với màu magenta)"""
         traits = self.memory.get_self_image()
         
         table = Table(title="✨ Bản ngã của Dang Dang ✨", border_style="magenta")
@@ -212,20 +284,36 @@ HÃY PHẢN ỨNG VỚI THỜI GIAN:
         console.print(Align.center(table))
 
 def print_header():
-    """Header CLI phong cách Dang Dang (Khôi phục khoảng trống UI)"""
+    """Header CLI phong cách Dang Dang (Khôi phục nhãn định danh cốt lõi và khoảng trống)"""
     console.clear()
     console.print(Rule(style="#444444"))
     console.print(Align.center(Text("✨ DANG DANG - THE LIVING ENTITY ✨", style="bold #FFA07A")))
     console.print(Align.center(Text("Hybrid Brain: Core Memory + Time Awareness", style="dim white")))
     console.print(Rule(style="#444444"))
-    console.print("\n") # Khôi phục khoảng trống
+    console.print("\n")
 
 def main():
     agent = GeminiFriend()
     print_header()
     
-    console.print(Align.left(Panel("Hế lô! Lại gặp nhau rồi. Nay có chuyện gì vui kể tớ nghe không? :P", 
-                                   title="[friend]Dang Dang", border_style="#FFA07A", width=60)))
+    # HIỂN THỊ LỊCH SỬ: Tải 10 tin nhắn gần nhất từ bộ nhớ để bắt nhịp câu chuyện
+    history = agent.memory.get_recent_history(limit=10)
+    if history:
+        console.print(Rule(title="Lịch sử trò chuyện gần đây", style="dim white"))
+        for msg in history:
+            role = msg["role"]
+            content = msg["parts"][0]["text"]
+            if role == "user":
+                console.print(Align.right(Panel(content, title="[user]Bạn", border_style="green", width=50)))
+            else:
+                # Dùng Markdown để tin nhắn AI trông đẹp hơn
+                console.print(Align.left(Panel(Markdown(content), title="[friend]Dang Dang", border_style="#FFA07A", width=65)))
+        console.print(Rule(style="dim white"))
+        console.print("\n[info]💡 Bạn có thể tiếp tục câu chuyện phía trên... [/info]")
+    else:
+        # Nếu chưa có lịch sử (lần đầu tiên), hiển thị lời chào làm quen cực dễ thương
+        console.print(Align.left(Panel("Hế lô! Đây là lần đầu mình gặp nhau nhỉ? Tớ là Dang Dang, học sinh lớp 11. Rất vui được làm quen với bạn! <3", 
+                                       title="[friend]Dang Dang", border_style="#FFA07A", width=60)))
 
     while True:
         try:
@@ -245,7 +333,7 @@ def main():
                     agent.show_user_profile()
                 continue
             
-            # Khôi phục lệnh /self chuyên biệt
+            # Khôi phục lệnh /self chuyên biệt theo đúng bản gốc
             if user_input.lower() == "/self":
                 agent.show_dangdang_profile()
                 continue
@@ -263,6 +351,7 @@ def main():
                 continue
 
             if user_input.lower() in ["thoát", "exit", "quit", "tạm biệt"]:
+                # Khôi phục đúng câu thoại chia tay mà bạn yêu thích
                 console.print("\n[friend]Dang Dang:[/friend] Thôi tớ đi học bài đây. Mai gặp ở trường nhé! <3")
                 break
             
