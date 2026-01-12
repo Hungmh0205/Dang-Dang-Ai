@@ -1,5 +1,32 @@
+# General
+.DS_Store
+Thumbs.db
+
+# Environments
 .env
-dangdang_memory.db
+venv/
+env/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Database
+data/
+backups/
+*.db
+*.sqlite3
+postgres_data/
+
+# Logs
+*.log
+
+# IDE
+.vscode/
+.idea/
+
+# Project Specific (Preserving existing)
 prompt.txt
-__pycache__/cognition.cpython-313.pyc
-__pycache__/memory.cpython-313.pyc
+dangdang_memory.db
