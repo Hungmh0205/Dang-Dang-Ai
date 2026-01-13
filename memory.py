@@ -8,6 +8,7 @@ import time
 from datetime import datetime
 from db_connection import get_db_manager
 from core.session_manager import SessionManager
+from core.memory_decay import MemoryDecayer
 import logging
 
 logger = logging.getLogger(__name__)
@@ -16,55 +17,32 @@ class MemoryManager:
     def __init__(self):
         """Khởi tạo Memory Manager với PostgreSQL connection pool"""
         self.db = get_db_manager()
-        self.session_mgr = SessionManager(self.db)  # NEW: Session tracking
+        self.session_mgr = SessionManager(self.db)
+        self.decayer = MemoryDecayer()
         self.init_db()
+        
+        # Run decay cycle on startup (in background or blocking is fine since it's fast)
+        self.decayer.run_decay_cycle()
 
     def init_db(self):
         """Khởi tạo cấu trúc cơ sở dữ liệu với đầy đủ các bảng chức năng và nhãn linh hồn"""
         try:
             with self.db.get_cursor(dict_cursor=False) as cursor:
+# ... (tables 1-3)
                 
-                # 1. Bảng lưu trữ trạng thái thực thể (Mood, Energy, Bond, Reflection)
-                cursor.execute("""
-                    CREATE TABLE IF NOT EXISTS bot_state (
-                        id INTEGER PRIMARY KEY,
-                        valence NUMERIC(3,2),
-                        energy NUMERIC(3,2), 
-                        bond NUMERIC(3,2),
-                        last_reflection TEXT
-                    )
-                """)
-                
-                # 2. Bảng tin nhắn (Bộ nhớ ngắn hạn - Short-term memory)
-                cursor.execute("""
-                    CREATE TABLE IF NOT EXISTS messages (
-                        id SERIAL PRIMARY KEY,
-                        role TEXT NOT NULL,
-                        content TEXT NOT NULL,
-                        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    )
-                """)
-                
-                # 3. Bảng hồ sơ NGƯỜI DÙNG (Dữ liệu thực tế về đối phương)
-                cursor.execute("""
-                    CREATE TABLE IF NOT EXISTS profile (
-                        key TEXT PRIMARY KEY,
-                        value TEXT,
-                        confidence NUMERIC(3,2)
-                    )
-                """)
-                
-                # 4. Bảng ký ức sự kiện (Episodic Memory) - Có is_core để bảo vệ ký ức cốt lõi
+                # 4. Bảng ký ức sự kiện (Episodic Memory)
+                # Updated Phase 3: Added decay_locked
                 cursor.execute("""
                     CREATE TABLE IF NOT EXISTS episodic_memory (
                         id SERIAL PRIMARY KEY,
                         content TEXT NOT NULL,
-                        importance INTEGER,
+                        importance INTEGER DEFAULT 3,
                         emotion_tone TEXT,
                         is_core INTEGER DEFAULT 0,
                         timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        last_accessed TIMESTAMP,
-                        access_count INTEGER DEFAULT 0
+                        last_accessed TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        access_count INTEGER DEFAULT 0,
+                        decay_locked BOOLEAN DEFAULT FALSE
                     )
                 """)
 
@@ -287,15 +265,22 @@ class MemoryManager:
             conditions = " OR ".join(["content ILIKE %s"] * len(keywords))
             params = [f"%{w}%" for w in keywords] + [limit]
             
+            # PHASE 3 UPDATE: Select ID for reinforcement
             results = self.db.execute_query(
-                f"""SELECT content FROM episodic_memory 
+                f"""SELECT id, content FROM episodic_memory 
                     WHERE {conditions}
                     ORDER BY is_core DESC, importance DESC LIMIT %s""",
                 tuple(params),
                 fetch_all=True
             )
             
-            rows = [r[0] for r in results] if results else []
+            rows = []
+            if results:
+                for r in results:
+                    mem_id, content = r[0], r[1]
+                    rows.append(content)
+                    # Reinforce memory (Use it or lose it)
+                    self.decayer.reinforce_memory(mem_id)
             
             # Logic Bù đắp: Nếu quá ít kết quả, bổ sung bằng kỷ niệm quan trọng nhất
             if len(rows) < 2:
@@ -310,6 +295,8 @@ class MemoryManager:
     def get_important_memories(self, limit=5):
         """Lấy danh sách ký ức quan trọng (Ưu tiên Core Memory và độ quan trọng cao)"""
         try:
+            # Refactored to reinforcemenet as well? Maybe not strictly necessary for "Important" list,
+            # but usually recall = reinforcement. Let's keep it simple for now to avoid lag.
             results = self.db.execute_query(
                 """SELECT content FROM episodic_memory 
                    ORDER BY is_core DESC, importance DESC, id DESC LIMIT %s""",
@@ -321,33 +308,13 @@ class MemoryManager:
             logger.error(f"Error getting important memories: {e}")
             return []
 
-    def save_message(self, role, content, is_proactive=False, event_id=None):
-        """
-        Lưu trữ tin nhắn với session tracking
-        
-        Args:
-            role: 'user' hoặc 'model'
-            content: Nội dung tin nhắn
-            is_proactive: True nếu là proactive message
-            event_id: ID của proactive event (nếu có)
-        """
+    def save_message(self, role, content):
+        """Lưu tin nhắn ngắn hạn vào database"""
         try:
-            # Check if need new session
-            last_msg_time = self.get_last_message_timestamp()
-            
-            if self.session_mgr.should_start_new_session(last_msg_time):
-                session_id = self.session_mgr.start_session()
-            else:
-                session_id = self.session_mgr.current_session_id
-            
-            # Save với session context
-            now = datetime.now()
-            self.db.execute_query("""
-                INSERT INTO messages 
-                (role, content, session_id, day_date, timestamp, is_proactive, proactive_event_id)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
-            """, (role, content, session_id, now.date(), now, is_proactive, event_id))
-            
+            self.db.execute_query(
+                "INSERT INTO messages (role, content) VALUES (%s, %s)",
+                (role, content)
+            )
         except Exception as e:
             logger.error(f"Error saving message: {e}")
 
@@ -374,51 +341,15 @@ class MemoryManager:
     def save_episode(self, content, importance, emotion_tone, is_core=0):
         """Ghi lại một kỷ niệm sự kiện vào bộ nhớ dài hạn"""
         try:
+            today = datetime.now().date()
             self.db.execute_query(
-                """INSERT INTO episodic_memory (content, importance, emotion_tone, is_core) 
-                   VALUES (%s, %s, %s, %s)""",
-                (content, importance, emotion_tone, is_core)
+                """INSERT INTO episodic_memory (content, importance, emotion_tone, is_core, day_date) 
+                   VALUES (%s, %s, %s, %s, %s)""",
+                (content, importance, emotion_tone, is_core, today)
             )
         except Exception as e:
             logger.error(f"Error saving episode: {e}")
 
     def decay_memories(self):
-        """Xói mòn ký ức theo thời gian vật lý, bảo vệ ký ức cốt lõi và kỷ niệm mức độ 4-5"""
-        try:
-            # Kiểm tra thời gian thực hiện decay lần cuối
-            result = self.db.execute_query(
-                "SELECT value FROM memory_meta WHERE key = 'last_decay_ts'",
-                fetch_one=True
-            )
-            
-            if not result:
-                return
-            
-            last_decay = float(result[0])
-            now = time.time()
-            
-            # Chỉ thực hiện decay sau mỗi 1 giờ vật lý
-            if (now - last_decay) < 3600:
-                return
-
-            # Logic bảo vệ linh hồn: Chỉ giảm tầm quan trọng của ký ức thường
-            self.db.execute_query(
-                """UPDATE episodic_memory 
-                   SET importance = importance - 1 
-                   WHERE is_core = 0 AND importance > 1 AND importance < 4"""
-            )
-            
-            # Loại bỏ hoàn toàn các ký ức đã phai mờ
-            self.db.execute_query(
-                "DELETE FROM episodic_memory WHERE importance <= 0 AND is_core = 0"
-            )
-            
-            # Cập nhật dấu thời gian
-            self.db.execute_query(
-                "UPDATE memory_meta SET value = %s WHERE key = 'last_decay_ts'",
-                (str(now),)
-            )
-            
-            logger.info("🧹 Memory decay completed")
-        except Exception as e:
-            logger.error(f"Error during memory decay: {e}")
+        """DEPRECATED: Delegates to MemoryDecayer"""
+        self.decayer.run_decay_cycle()

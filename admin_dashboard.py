@@ -53,7 +53,7 @@ def get_table_list():
 # Sidebar
 st.sidebar.title("🧠 Dang Dang Brain")
 st.sidebar.markdown("---")
-option = st.sidebar.radio("Navigation", ["Dashboard", "Data Manager", "SQL Runner"])
+option = st.sidebar.radio("Navigation", ["Dashboard", "Relationship", "Data Manager", "SQL Runner"])
 
 # --- TAB 1: DASHBOARD ---
 if option == "Dashboard":
@@ -98,35 +98,78 @@ if option == "Dashboard":
 
 # --- TAB 2: DATA MANAGER ---
 elif option == "Data Manager":
-    st.title("📝 Data Manager")
+    st.title("🗃️ Data Manager")
     
     tables = get_table_list()
-    selected_table = st.selectbox("Select Table", tables)
+    selected_table = st.selectbox("Select Table", tables, index=0 if tables else None)
     
     if selected_table:
-        # Load Data
+        # Load data
         df = run_query(f"SELECT * FROM {selected_table} ORDER BY 1 DESC LIMIT 100")
         
-        st.markdown(f"### viewing `{selected_table}` (Latest 100 rows)")
-        
-        # Edit capability is limited in simple SQL, so we allow DELETE mainly
+        st.subheader(f"Latest 100 rows in '{selected_table}'")
         edited_df = st.data_editor(df, num_rows="dynamic", use_container_width=True)
         
-        col1, col2 = st.columns([1, 4])
-        with col1:
-            row_id_to_delete = st.number_input("Delete Row ID", min_value=1, step=1)
-            if st.button("Delete Row", type="primary"):
-                try:
-                    # Assuming first column is 'id'
-                    id_col = df.columns[0]
-                    run_query(f"DELETE FROM {selected_table} WHERE {id_col} = %s", (row_id_to_delete,), fetch=False)
-                    st.success(f"Deleted row {row_id_to_delete}")
-                    time.sleep(1)
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Delete failed: {e}")
+        # Delete functionality
+        st.subheader("⚠️ Delete Row")
+        row_id = st.number_input("Enter ID to delete", min_value=1, step=1)
+        if st.button("Delete Row"):
+            try:
+                # Assuming first column is always ID
+                pk_col = df.columns[0]
+                run_query(f"DELETE FROM {selected_table} WHERE {pk_col} = %s", (row_id,), fetch=False)
+                st.success(f"Deleted row {row_id} from {selected_table}")
+                time.sleep(1)
+                st.rerun()
+            except Exception as e:
+                st.error(f"Error deleting: {e}")
 
-# --- TAB 3: SQL RUNNER ---
+# --- TAB 3: RELATIONSHIP (V3.0) ---
+elif option == "Relationship":
+    st.title("❤️ Soul & Relationship Stats")
+    
+    st.markdown("### 🌱 Maturity Progress")
+    try:
+        # Get Relationship State
+        state = run_query("SELECT * FROM relationship_state WHERE user_id = 'user'", fetch=True)
+        if not state.empty:
+            row = state.iloc[0]
+            level = row['level']
+            xp = row['current_xp']
+            trust = row['trust_score']
+            days = row['days_active']
+            
+            # Metrics
+            col1, col2, col3, col4 = st.columns(4)
+            col1.metric("Current Level", level)
+            col2.metric("XP Earned", xp)
+            col3.metric("Trust Score", f"{trust:.2f}")
+            col4.metric("Days Active", days)
+            
+            # Progress Bar (Approximate)
+            base_xp = 100
+            xp_needed = int(base_xp * (1.5 ** (level - 1)))
+            progress = min(1.0, xp / xp_needed) if xp_needed > 0 else 0
+            st.progress(progress, text=f"Progress to Lv {level + 1} ({xp}/{xp_needed} XP)")
+            
+        else:
+            st.warning("No relationship state found. Start chatting to Initialize!")
+            
+    except Exception as e:
+        st.error(f"Error loading stats: {e}")
+
+    st.markdown("---")
+    st.markdown("### 🧠 Core Memories (Emotional Milestones)")
+    try:
+        memories = run_query("SELECT * FROM core_memories ORDER BY created_at DESC", fetch=True)
+        if not memories.empty:
+            st.dataframe(memories, use_container_width=True)
+        else:
+            st.info("No core memories yet. Share a deep moment to create one!")
+    except Exception as e:
+        st.error(f"Error loading memories: {e}")
+
+# --- TAB 4: SQL RUNNER ---
 elif option == "SQL Runner":
     st.title("⚡ SQL Query Runner")
     st.warning("⚠️ Be careful! This executes raw SQL directly.")

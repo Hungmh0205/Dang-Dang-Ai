@@ -9,14 +9,13 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+from core.sentiment_arbiter import SentimentArbiter
+from core.pattern_detector import PatternDetector
+
+# ...
+
 class DailyConsolidator:
-    """
-    Consolidate daily memories into summaries
-    - Analyze emotional trends
-    - Extract key topics
-    - Identify memorable moments
-    """
-    
+    # ...
     def __init__(self, memory_manager):
         """
         Initialize DailyConsolidator
@@ -26,64 +25,68 @@ class DailyConsolidator:
         """
         self.memory = memory_manager
         self.db = memory_manager.db
+        self.arbiter = SentimentArbiter()
+        self.pattern_detector = PatternDetector(memory_manager)
     
     def consolidate_day(self, target_date):
         """
         Generate summary cho một ngày cụ thể
-        
-        Args:
-            target_date: date object của ngày cần consolidate
-        
-        Returns:
-            bool: True if successful
         """
         try:
             logger.info(f"Consolidating memories for {target_date}")
             
             # 1. Gather data
-            sessions = self._get_sessions_for_date(target_date)
             messages = self._get_messages_for_date(target_date)
             
             if not messages:
                 logger.info(f"No messages for {target_date}, skipping")
                 return False
             
-            # 2. Analyze emotions
-            emotions = self._analyze_emotional_trend(target_date)
+            # 2. Generate Summary using LLM (Qwen)
+            summary_text = self.arbiter.summarize_day(messages)
             
-            # 3. Extract topics
-            topics = self._extract_topics(messages)
-            
-            # 4. Get memorable moments
-            memorable = self._get_memorable_moments(target_date)
-            
-            # 5. Generate summary text
-            summary_text = self._generate_summary(sessions, emotions, topics)
-            
-            # 6. Save to database
+            # 3. Save Summary to Daily Summaries Table (Analytic view)
+            # Use fallback values for now or expand analysis later
+            logger.debug(f"Saving summary params: {target_date}, {len(messages)}, {summary_text[:20]}...")
             self.db.execute_query("""
                 INSERT INTO daily_summaries 
-                (summary_date, session_count, total_messages, emotional_summary,
-                 key_topics, memorable_moments, valence_avg, energy_avg, bond_avg)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                (summary_date, total_messages, emotional_summary, generated_at)
+                VALUES (%s, %s, %s, CURRENT_TIMESTAMP)
                 ON CONFLICT (summary_date) DO UPDATE SET
                     emotional_summary = EXCLUDED.emotional_summary,
-                    key_topics = EXCLUDED.key_topics,
-                    memorable_moments = EXCLUDED.memorable_moments,
-                    generated_at = CURRENT_TIMESTAMP
-            """, (
-                target_date,
-                len(sessions),
-                len(messages),
-                summary_text,
-                topics,
-                memorable,
-                emotions['valence'],
-                emotions['energy'],
-                emotions['bond']
-            ))
+                    total_messages = EXCLUDED.total_messages
+            """, (target_date, len(messages), summary_text))
+
+            # 4. MEMORY REPLACEMENT LOGIC
+            # Save Summary as Episodic Memory
+            summary_content = f"[CONSOLIDATED {target_date}] {summary_text}"
+            self.memory.save_episode(
+                content=summary_content, 
+                importance=5, # Medium-High importance for daily summaries
+                emotion_tone='neutral', # Neutral container
+                is_core=0
+            ) 
             
-            logger.info(f"✅ Consolidated {target_date}: {len(messages)} messages, {len(topics)} topics")
+            # 5. Archive old fragments (Optional/Per request)
+            # Mark raw episodic memories of that day as archived (importance=0)
+            # Excluding 'Core Memories' (importance >= 8) and newly created summary
+            self.db.execute_query("""
+                UPDATE episodic_memory 
+                SET importance = 0
+                WHERE day_date = %s 
+                  AND importance < 8 
+                  AND content != %s 
+                  AND is_core = 0
+            """, (target_date, summary_content))
+            
+            # 6. PATTERN DETECTION (Weekly or Daily check)
+            # We run it daily, looking back 7 days
+            try:
+                self.pattern_detector.detect_patterns(lookback_days=7)
+            except Exception as e:
+                logger.error(f"Pattern detection step failed: {e}")
+            
+            logger.info(f"✅ Consolidated {target_date}: {summary_text[:50]}...")
             return True
             
         except Exception as e:

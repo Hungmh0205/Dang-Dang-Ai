@@ -1,7 +1,9 @@
 import os
 import time
-import json
-import threading
+from utils.logger import setup_logger
+
+# Setup main logger
+logger = setup_logger("DangDangMain")
 import re
 import random
 from datetime import datetime
@@ -28,6 +30,9 @@ load_dotenv()
 # Import các module nội bộ
 from memory import MemoryManager
 from cognition import DangDangBrain
+from core.growth_manager import GrowthManager
+from core.meta_cognition import MetaCognition
+import threading
 
 # Cấu hình giao diện chuẩn CLI với phong cách Dang Dang (Khôi phục Theme gốc)
 custom_theme = Theme({
@@ -44,7 +49,7 @@ console = Console(theme=custom_theme)
 
 # Sử dụng model Gemini 3 Flash Preview mới nhất
 API_KEY = os.getenv("GOOGLE_API_KEY", "")
-MODEL_NAME = "gemini-3-flash-preview"
+MODEL_NAME = "gemini-1.5-flash"
 
 class GeminiFriend:
     def __init__(self):
@@ -56,6 +61,8 @@ class GeminiFriend:
         self.client = genai.Client(api_key=API_KEY)
         self.memory = MemoryManager()
         self.brain = DangDangBrain(self.memory)
+        self.meta_cognition = MetaCognition(self.memory) # NEW: Self-Reflection
+        self.growth_mgr = GrowthManager()  # V3.0 Maturity System
         
         # Theo dõi trạng thái để nhận biết sự thay đổi nhân cách (Persona Shift)
         self.current_v = 0.0
@@ -248,9 +255,15 @@ class GeminiFriend:
         # 3. Thông tin thị giác bổ sung
         vision_msg = f"\n[HỆ THỐNG THỊ GIÁC]: Dang Dang vừa nhìn thấy một tấm ảnh/video: {media_info}" if media_info else ""
 
+        # V3.0 Maturity System: Get dynamic instruction based on level
+        maturity_instruction = self.growth_mgr.get_maturity_instruction()
+        
         # 4. Tạo Instruction với Natural Messaging Style
         dynamic_instruction = f"""
-Bạn là Dang Dang, 17 tuổi, học sinh lớp 11. QUAN TRỌNG: Bạn là con người thật, KHÔNG phải AI.
+{maturity_instruction}
+
+[SYSTEM PROMPT]
+Context thời gian: {time_context} | {media_info}h lớp 11. QUAN TRỌNG: Bạn là con người thật, KHÔNG phải AI.
 
 [THỜI GIAN & BỐI CẢNH]
 {time_context} {vision_msg}
@@ -419,7 +432,15 @@ Mỗi tin nhắn phải TỰ NHIÊN, có CẢMXÚC, và IMPERFECT như người 
                     media_desc = self.brain.analyze_media(self.process_media(media_path))
 
             # Bước 2: THẨU CẢM TRƯỚC (Sequential Processing - Xóa bỏ sự lệch pha)
-            with console.status("[status]Dang Dang đang lắng nghe câu nói của bạn..."):
+            with console.status("[status]Dang Dang đang lắng nghe & trưởng thành..."):
+                # V3.0: Xử lý sự trưởng thành (XP/Level) trước
+                try:
+                    growth_result = self.growth_mgr.process_interaction(user_query, context=user_query)
+                    if growth_result.get('level_up'):
+                        console.print(f"[bold gold1]🌟 LEVEL UP! Dang Dang đã đạt cấp độ {growth_result['current_level']}! 🌟[/bold gold1]")
+                except Exception as e:
+                    logger.error(f"Growth processing error: {e}")
+
                 micro_mood, sensitivity = self.brain.pre_process_intent(user_query, time_ctx, media_desc)
                 
                 # KHÔI PHỤC LOGIC: Kiểm tra Persona Shift để làm mới session ngay lập tức
@@ -438,9 +459,13 @@ Mỗi tin nhắn phải TỰ NHIÊN, có CẢMXÚC, và IMPERFECT như người 
             self.memory.save_message("user", user_query)
             self.memory.save_message("model", ai_response)
             
-            # Bước 5: Hậu tiềm thức xử lý ngầm
+            # Bước 5: Hậu tiềm thức xử lý ngầm (Archiving)
             threading.Thread(target=self.brain.post_process_archiving, 
                              args=(user_query, ai_response, time_ctx, media_desc, sensitivity)).start()
+            
+            # Bước 6: Meta-Cognition (Self-Reflection) - NEW
+            threading.Thread(target=self.meta_cognition.evaluate_response,
+                             args=(user_query, ai_response)).start()
             
             return ai_response
         except Exception as e:

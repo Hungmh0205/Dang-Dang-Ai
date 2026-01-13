@@ -9,10 +9,10 @@ from contextlib import contextmanager
 import time
 import os
 from dotenv import load_dotenv
-import logging
+from utils.logger import setup_logger
 
 # Setup logging
-logger = logging.getLogger(__name__)
+logger = setup_logger("DatabaseManager")
 
 load_dotenv()
 
